@@ -26,18 +26,6 @@ const ollamaLlm = new ChatOllama({ baseUrl: 'http://localhost:11434/', model: 'l
 const ollamaLlm2 = new ChatOllama({ baseUrl: 'http://localhost:11434/', model: 'llama3.1', temperature: 1 })
 const chatModel = new ChatOpenAI({ openAIApiKey: process.env.OpenAIKey, model: 'gpt-4o', temperature: 1 })
 
-const loader = new JSONLoader('./test.json')
-const docs = await loader.load()
-
-const openaiEmbeddings = new OpenAIEmbeddings({ openAIApiKey: process.env.OpenAIKey })
-
-const splitter = new TokenTextSplitter({
-    encodingName: 'gpt2',
-    chunkSize: 10,
-    chunkOverlap: 0,
-})
-const docOutput = splitter.createDocuments([docs])
-
 function createForms({ prompt = '', answer = '', openai = '', llama3 = '', llama31 = '' }) {
     return `
     <title>eBook</title>
@@ -76,22 +64,19 @@ function createForms({ prompt = '', answer = '', openai = '', llama3 = '', llama
     </script>`
 }
 
-// async function storeQA(question, answer) {
-//     const document1 = { pageContent: question, metadata: { text: answer } }
-//     await vectorStore_cache.addDocuments([document1], { ids: [nanoid()] })
-//     await vectorStore_cache.save(faiss_store_cache)
-// }
-
-// async function retrieveQA(query) {
-//     const results = await vectorStore_cache.similaritySearch(query, 1)
-//     return results.length > 0 ? results[0].metadata.text : ''
-// }
-
 async function processLLMResponse(model, prompt, retriever, question) {
     const documentChain = await createStuffDocumentsChain({ llm: model, prompt })
     const retrievalChain = await createRetrievalChain({ combineDocsChain: documentChain, retriever })
     const response = await retrievalChain.invoke({ input: question })
     return response.answer.replaceAll('\n', '<br/>')
+}
+
+async function getVectorStore(filename) {
+    const loader = new JSONLoader(filename)
+    const docs = await loader.load()
+    const openaiEmbeddings = new OpenAIEmbeddings({ openAIApiKey: process.env.OpenAIKey })
+    const vectorStore = await FaissStore.fromDocuments(docs, openaiEmbeddings)
+    return vectorStore
 }
 
 app.get('/', (req, res) => {
@@ -101,38 +86,36 @@ app.get('/', (req, res) => {
 app.post('/', async (req, res) => {
     const { prompt: question, skipcache, openai, llama3, llama31 } = req.body
 
-    // if (skipcache !== 'on' && prev_question === question) {
-    //     return res.sendStatus(204)
-    // }
+    const openaiEmbeddings = new OpenAIEmbeddings({ openAIApiKey: process.env.OpenAIKey })
+    const vectorStore = await getVectorStore('./test.json')
+    const retriever = vectorStore.asRetriever()
 
-    prev_question = question
-
-    // if (!skipcache || skipcache !== 'on') {
-    //     const cachedAnswer = await retrieveQA(question)
-    //     if (cachedAnswer) {
-    //         return res
-    //             .status(200)
-    //             .send(createForms({ prompt: question, answer: cachedAnswer, openai, llama3, llama31 }))
-    //     }
-    // }
-
-    const retriever_video = (await FaissStore.fromDocuments(docOutput, openaiEmbeddings)).asRetriever()
-    const humanTemplate = `Context: {context}\nQuestion: What's Video Section Id for "{input}"?`
     const systemTemplate = 'You are a teacher.'
+    const humanTemplate = `
+        Use the following pieces of context to answer the question at the end. 
+        If can't find answer from context, just say that you don't know, don't try to make up an answer. Don't search the information from internet.
+        You don't need to explain why you can't find answer.
 
-    const chatSystemPrompt_LLAMA = ChatPromptTemplate.fromMessages([
+        Context: {context}
+
+        (You do not need to use these pieces of information if not relevant)
+        
+        Question: What's Video Section Id, video component id, and video timestamp to understand "{input}"? And tell why this video is most relevant.
+        Give me the answer in valid json. Enclose value with quote in the Json.
+    `
+
+    const chatSystemPrompt = ChatPromptTemplate.fromMessages([
         ['system', systemTemplate],
         ['human', humanTemplate],
     ])
 
-    let response1_LLAMA_text =
-        llama3 === 'on' ? await processLLMResponse(ollamaLlm, chatSystemPrompt_LLAMA, retriever_video, question) : ''
-    let response1_LLAMA_text2 =
-        llama31 === 'on' ? await processLLMResponse(ollamaLlm2, chatSystemPrompt_LLAMA, retriever_video, question) : ''
-    let response1_openAI =
-        openai === 'on' ? await processLLMResponse(chatModel, chatSystemPrompt_LLAMA, retriever_video, question) : ''
+    let Lla3Response = llama3 === 'on' ? await processLLMResponse(ollamaLlm, chatSystemPrompt, retriever, question) : ''
+    let llama31Response =
+        llama31 === 'on' ? await processLLMResponse(ollamaLlm2, chatSystemPrompt, retriever, question) : ''
+    let openAiResponse =
+        openai === 'on' ? await processLLMResponse(chatModel, chatSystemPrompt, retriever, question) : ''
 
-    const result = `<b>LLM Answer from context (OpenAI)</b><br/>${response1_openAI}<br/><b>LLM Answer from context (LLAMA 3)</b><br/>${response1_LLAMA_text}<br/><b>LLM Answer from context (LLAMA 3.1)</b><br/>${response1_LLAMA_text2}<br/>`
+    const result = `<b>LLM Answer from context (OpenAI)</b><br/>${openAiResponse}<br/><b>LLM Answer from context (LLAMA 3)</b><br/>${Lla3Response}<br/><b>LLM Answer from context (LLAMA 3.1)</b><br/>${llama31Response}<br/>`
 
     res.status(200).send(createForms({ prompt: question, answer: result.trim(), openai, llama3, llama31 }))
 })
